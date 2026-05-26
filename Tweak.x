@@ -1,17 +1,14 @@
 #import <AVFoundation/AVFoundation.h>
 
-static BOOL isInterruptive(NSString *cat) {
-    return [cat isEqualToString:@"AVAudioSessionCategoryPlayback"]
-        || [cat isEqualToString:@"AVAudioSessionCategorySoloAmbient"]
-        || [cat isEqualToString:@"AVAudioSessionCategoryPlayAndRecord"]
-        || [cat isEqualToString:@"AVAudioSessionCategoryRecord"];
-}
-
 %hook AVAudioSession
 
 - (BOOL)setCategory:(NSString *)category error:(NSError **)outError {
-    if (isInterruptive(category)) {
-        return %orig(@"AVAudioSessionCategoryAmbient", outError);
+    if ([category isEqualToString:@"AVAudioSessionCategoryPlayback"]
+     || [category isEqualToString:@"AVAudioSessionCategorySoloAmbient"]) {
+        return [self setCategory:category
+                            mode:AVAudioSessionModeDefault
+                         options:AVAudioSessionCategoryOptionMixWithOthers
+                           error:outError];
     }
     return %orig;
 }
@@ -27,8 +24,8 @@ static BOOL isInterruptive(NSString *cat) {
 - (BOOL)setActive:(BOOL)active error:(NSError **)outError {
     if (active) {
         NSString *cur = [self category];
-        if (isInterruptive(cur)) {
-            [self setCategory:@"AVAudioSessionCategoryAmbient"
+        if ([cur isEqualToString:@"AVAudioSessionCategorySoloAmbient"]) {
+            [self setCategory:cur
                          mode:AVAudioSessionModeDefault
                       options:AVAudioSessionCategoryOptionMixWithOthers
                         error:nil];
@@ -40,8 +37,8 @@ static BOOL isInterruptive(NSString *cat) {
 - (BOOL)setActive:(BOOL)active withOptions:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
     if (active) {
         NSString *cur = [self category];
-        if (isInterruptive(cur)) {
-            [self setCategory:@"AVAudioSessionCategoryAmbient"
+        if ([cur isEqualToString:@"AVAudioSessionCategorySoloAmbient"]) {
+            [self setCategory:cur
                          mode:AVAudioSessionModeDefault
                       options:AVAudioSessionCategoryOptionMixWithOthers
                         error:nil];
