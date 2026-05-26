@@ -37,9 +37,8 @@ jobs:
           mkdir -p artifacts
           cp rootless/packages/*.deb   artifacts/ 2>/dev/null || true
           cp rootful/packages/*.deb    artifacts/ 2>/dev/null || true
-          mkdir -p /tmp/jailed-extract
-          dpkg-deb -x jailed/packages/*.deb /tmp/jailed-extract 2>/dev/null || true
-          cp /tmp/jailed-extract/Library/MobileSubstrate/DynamicLibraries/AudioMix.dylib artifacts/AudioMix_jailed.dylib 2>/dev/null || true
+          cp jailed/AudioMix.dylib artifacts/AudioMix_jailed.dylib 2>/dev/null || true
+          cp jailed/packages/*.deb artifacts/ 2>/dev/null || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
