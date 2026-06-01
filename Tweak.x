@@ -3,43 +3,41 @@
 
 // PleaseDontStopTheMusic
 //
-// Goal: let a second app play audio without pausing the music you already have
-// going, and keep your music app's lock-screen / Control Center "Now Playing"
-// controls.
-//
-// Default rule: when other audio is already playing, the "intruder" app is
-// forced to MixWithOthers so it joins the music as a *secondary* source. The
-// music app stays primary and keeps its Now-Playing controls.
+// Default rule (every app except TikTok): when other audio is already playing,
+// the "intruder" app is forced to MixWithOthers so it joins the music as a
+// *secondary* source. The music app stays primary and keeps its lock-screen /
+// Control Center "Now Playing" controls. This is the proven v2.2.0 behaviour and
+// is left completely untouched.
 //
 // Special case — TikTok Live PiP: TikTok Live uses a sample-buffer Picture-in-
 // Picture renderer that only advances video frames while its audio session is
-// the *primary* (hardware-clock) source. Forcing it to mix makes it secondary,
-// which freezes the PiP video. So for TikTok we flip the roles: TikTok keeps a
-// primary session (PiP video plays) and we tell the music app, over a Darwin
-// notification, to make ITS OWN session secondary (MixWithOthers) so it keeps
-// playing instead of being interrupted. The signal is sent as TikTok launches /
-// comes to the foreground, before TikTok's audio seizes the session, so the
-// music is already mixing and never pauses. When you return to the music app it
-// reclaims the primary session and its Now-Playing controls.
+// the *primary* (hardware-clock) source. Forcing it to mix freezes the PiP
+// video. So TikTok is kept primary, and — only while TikTok is in the
+// foreground — it sends a one-shot Darwin notification telling the background
+// music app to make ITS OWN session secondary (MixWithOthers) so TikTok's
+// primary session does not interrupt it. Net result: PiP video plays and the
+// music keeps going.
+//
+// Important: nothing here ever makes another app *seize* the primary session, so
+// it can never re-introduce the "intruder pauses your music" bug. The only app
+// that stays primary is TikTok itself.
 
-static BOOL gIsVideoApp     = NO;   // TikTok: stays primary, drives the role-flip
-static BOOL gForcedMusicMix = NO;   // this music app went secondary for TikTok
-static BOOL gReclaiming     = NO;   // music app reclaiming primary (skip auto-mix)
-static BOOL gSessionActive  = NO;   // tracks setActive: state
+static BOOL gIsVideoApp    = NO;   // TikTok: kept primary so its PiP clock runs
+static BOOL gSessionActive = NO;   // tracks setActive: state (are we playing?)
 
 static NSString *const kBegin = @"com.pdstm.pip.begin";
 
 static BOOL PDSTMShouldMix(AVAudioSession *s) {
-    if (gIsVideoApp)     return NO;    // TikTok stays primary so its PiP clock runs
-    if (gReclaiming)     return NO;    // explicit reclaim of primary
-    if (gForcedMusicMix) return YES;   // music app keeping itself secondary
-    return s.isOtherAudioPlaying;      // default: mix the intruder
+    if (gIsVideoApp) return NO;        // TikTok stays primary
+    return s.isOtherAudioPlaying;      // everyone else: exactly the v2.2.0 rule
 }
 
 static void PDSTMPost(NSString *name) { notify_post(name.UTF8String); }
 
-// Music side: TikTok wants the primary session — make ours secondary so we keep
-// playing instead of being interrupted.
+// Music side: TikTok is foreground and wants the primary session. If we are the
+// background app currently playing, make our session secondary (one shot) so we
+// keep playing instead of being interrupted. We never seize primary back here —
+// that is what previously broke Twitter/YouTube/Dr Driving.
 static void PDSTMGoSecondary(void) {
     if (gIsVideoApp) return;
     AVAudioSession *s = [AVAudioSession sharedInstance];
@@ -47,24 +45,10 @@ static void PDSTMGoSecondary(void) {
     BOOL playbackish = [cat isEqualToString:AVAudioSessionCategoryPlayback]
                     || [cat isEqualToString:AVAudioSessionCategoryPlayAndRecord];
     if (!gSessionActive || !playbackish) return;
-    gForcedMusicMix = YES;
-    if (s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers) return; // already mixing
+    if (s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers) return;
     [s setCategory:cat mode:s.mode
            options:(s.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers) error:nil];
     [s setActive:YES error:nil];
-}
-
-// Music side: user came back to the music app — reclaim the primary session and
-// the Now-Playing controls.
-static void PDSTMReclaimPrimary(void) {
-    if (gIsVideoApp || !gForcedMusicMix) return;
-    gForcedMusicMix = NO;
-    AVAudioSession *s = [AVAudioSession sharedInstance];
-    gReclaiming = YES;
-    [s setCategory:s.category mode:s.mode
-           options:(s.categoryOptions & ~AVAudioSessionCategoryOptionMixWithOthers) error:nil];
-    [s setActive:YES error:nil];
-    gReclaiming = NO;
 }
 
 static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRef name,
@@ -144,23 +128,20 @@ static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRe
                         @"com.ss.iphone.ugc.Ame" ];        // TikTok (other region)
     gIsVideoApp = [video containsObject:bid];
 
-    CFNotificationCenterRef dc = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterAddObserver(dc, NULL, PDSTMDarwinCallback,
-        (__bridge CFStringRef)kBegin, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-
     if (gIsVideoApp) {
-        // Tell the music app to go secondary as TikTok comes to the foreground,
-        // before TikTok's Live audio seizes the primary session.
+        // TikTok only posts (never observes). Tell the background music app to go
+        // secondary as TikTok comes to the foreground, before TikTok's Live audio
+        // seizes the primary session.
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidBecomeActiveNotification"
             object:nil queue:nil usingBlock:^(NSNotification *n) { PDSTMPost(kBegin); }];
         [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationWillEnterForegroundNotification"
             object:nil queue:nil usingBlock:^(NSNotification *n) { PDSTMPost(kBegin); }];
         PDSTMPost(kBegin);
     } else {
-        // Music app: reclaim the primary session (and Now-Playing controls) when
-        // the user returns to it.
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidBecomeActiveNotification"
-            object:nil queue:nil usingBlock:^(NSNotification *n) { PDSTMReclaimPrimary(); }];
+        // Music app only listens; it never seizes primary on its own.
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            PDSTMDarwinCallback, (__bridge CFStringRef)kBegin, NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
     }
 
     NSLog(@"[PleaseDontStopTheMusic] loaded (bundle=%@ video=%d)", bid, gIsVideoApp);
